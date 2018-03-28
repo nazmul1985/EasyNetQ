@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading;
@@ -20,10 +20,11 @@ namespace EasyNetQ.Consumer
 
         private readonly IInternalConsumerFactory internalConsumerFactory;
         private readonly IEventBus eventBus;
-  
+
         private readonly ConcurrentDictionary<IInternalConsumer, object> internalConsumers = new ConcurrentDictionary<IInternalConsumer, object>();
 
         private readonly IList<CancelSubscription> eventCancellations = new List<CancelSubscription>();
+        private readonly object lockObject = new object();
 
         public ExclusiveConsumer(
             IQueue queue,
@@ -40,7 +41,7 @@ namespace EasyNetQ.Consumer
             Preconditions.CheckNotNull(internalConsumerFactory, "internalConsumerFactory");
             Preconditions.CheckNotNull(eventBus, "eventBus");
             Preconditions.CheckNotNull(configuration, "configuration");
-       
+
             this.queue = queue;
             this.onMessage = onMessage;
             this.connection = connection;
@@ -50,14 +51,29 @@ namespace EasyNetQ.Consumer
 #if !NETFX
             timer = new Timer(s =>
                 {
-                    StartConsumer();
-                    timer.Change(10000, -1);
+                    lock (lockObject)
+                    {
+                        if (disposed)
+                        {
+                            return;
+                        }
+                        StartConsumer();
+                        timer.Change(10000, -1);
+                    }
+
                 }, null, 10000, Timeout.Infinite);
 #else
             timer = new Timer(s =>
                 {
-                    StartConsumer();
-                    ((Timer)s).Change(10000, -1);
+                    lock (lockObject)
+                        {
+             if (disposed)
+                        {
+                            return;
+                        }
+                            StartConsumer();
+                            ((Timer)s).Change(10000, -1);
+                        }
                 });
 
              timer.Change(10000, -1);
@@ -69,7 +85,7 @@ namespace EasyNetQ.Consumer
             eventCancellations.Add(eventBus.Subscribe<ConnectionCreatedEvent>(e => ConnectionOnConnected()));
             eventCancellations.Add(eventBus.Subscribe<ConnectionDisconnectedEvent>(e => ConnectionOnDisconnected()));
             StartConsumer();
-            return new ConsumerCancellation(Dispose);   
+            return new ConsumerCancellation(Dispose);
         }
 
         private void StartConsumer()
@@ -122,19 +138,23 @@ namespace EasyNetQ.Consumer
 
         public void Dispose()
         {
-            if (disposed)
-                return;
-            disposed = true;
-            timer.Dispose();
-            eventBus.Publish(new StoppedConsumingEvent(this));
-            foreach (var cancelSubscription in eventCancellations)
+            lock (lockObject)
             {
-                cancelSubscription();
+                if (disposed)
+                    return;
+                disposed = true;
+                timer.Dispose();
+                eventBus.Publish(new StoppedConsumingEvent(this));
+                foreach (var cancelSubscription in eventCancellations)
+                {
+                    cancelSubscription();
+                }
+                foreach (var internalConsumer in internalConsumers.Keys)
+                {
+                    internalConsumer.Dispose();
+                }
             }
-            foreach (var internalConsumer in internalConsumers.Keys)
-            {
-                internalConsumer.Dispose();
-            }
+            
         }
     }
 }
